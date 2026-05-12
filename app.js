@@ -1,19 +1,12 @@
 /* ════════════════════════════════════
-   PILA BARBEARIA – APP.JS (Firebase)
+   PILA BARBEARIA – APP.JS (Supabase)
 ════════════════════════════════════ */
 
-// ── CONFIGURAÇÃO FIREBASE ────────────────────────────────────
-// ⚠ SUBSTITUA pelos dados do SEU projeto Firebase:
-const FIREBASE_CONFIG = {
-  apiKey:            "SUA_API_KEY",
-  authDomain:        "SEU_PROJETO.firebaseapp.com",
-  projectId:         "SEU_PROJETO_ID",
-  storageBucket:     "SEU_PROJETO.appspot.com",
-  messagingSenderId: "SEU_SENDER_ID",
-  appId:             "SEU_APP_ID",
-};
+// ── CONFIGURAÇÃO SUPABASE ─────────────────────────────────────
+const SUPABASE_URL = 'https://bszwdgrzcpvkjuagjhva.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_H7aYIVg7ejo8-RlWOhaHMA__d_C24ou';
 
-// ── SENHAS DOS BARBEIROS ─────────────────────────────────────
+// ── SENHAS DOS BARBEIROS ──────────────────────────────────────
 const PASSWORDS = {
   'pila123':  'Rafael King',
   'pila2026': 'Marcos Silva',
@@ -31,41 +24,34 @@ function generateSlots() {
 const ALL_SLOTS = generateSlots();
 
 // ── ESTADO LOCAL ─────────────────────────────────────────────
-let selectedTime     = null;
-let appointments     = [];   // sempre vem do Firestore
-let loggedIn         = false;
-let adminWho         = '';
-let lastBookedId     = null;
-let db               = null;
-let unsubscribeAdmin = null;
+let selectedTime = null;
+let appointments = [];
+let loggedIn     = false;
+let adminWho     = '';
+let lastBookedId = null;
+let supabase     = null;
+let adminChannel = null;
 
-// ── INICIALIZAR FIREBASE ─────────────────────────────────────
-async function initFirebase() {
-  const { initializeApp } = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js');
-  const { getFirestore, collection, addDoc, getDocs, deleteDoc, doc,
-          updateDoc, query, where, orderBy, onSnapshot }
-    = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js');
-
-  const app = initializeApp(FIREBASE_CONFIG);
-  db = getFirestore(app);
-
-  // Guarda funções no global para uso nas outras funções
-  window._fs = { collection, addDoc, getDocs, deleteDoc, doc, updateDoc, query, where, orderBy, onSnapshot };
-
+// ── INICIALIZAR SUPABASE ──────────────────────────────────────
+async function initSupabase() {
+  const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm');
+  supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
   await loadAppointmentsForDate(document.getElementById('bookingDate').value);
 }
 
-// ── CARREGAR AGENDAMENTOS DE UMA DATA (picker de horários) ────
+// ── CARREGAR AGENDAMENTOS DE UMA DATA ────────────────────────
 async function loadAppointmentsForDate(date) {
-  if (!db || !date) return;
-  const { collection, query, where, getDocs } = window._fs;
-  const q    = query(collection(db, 'appointments'), where('date', '==', date));
-  const snap = await getDocs(q);
-  appointments = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  if (!supabase || !date) return;
+  const { data, error } = await supabase
+    .from('appointments')
+    .select('*')
+    .eq('date', date);
+  if (error) { console.error(error); return; }
+  appointments = data || [];
   renderTimeSlots();
 }
 
-// ── NAVBAR SCROLL ────────────────────────────────────────────
+// ── NAVBAR SCROLL ─────────────────────────────────────────────
 const navbar = document.getElementById('navbar');
 if (navbar) {
   window.addEventListener('scroll', () => {
@@ -73,27 +59,27 @@ if (navbar) {
   }, { passive: true });
 }
 
-// ── DATA MÍNIMA ──────────────────────────────────────────────
+// ── DATA MÍNIMA ───────────────────────────────────────────────
 const dateInput = document.getElementById('bookingDate');
 const todayStr  = new Date().toISOString().split('T')[0];
 dateInput.min   = todayStr;
 dateInput.value = todayStr;
-renderTimeSlots(); // renderiza vazio enquanto Firebase carrega
+renderTimeSlots();
 
-// Inicia Firebase
-initFirebase().catch(err => {
-  console.error('Erro Firebase:', err);
+// Inicia Supabase
+initSupabase().catch(err => {
+  console.error('Erro Supabase:', err);
   toast('⚠ Erro de conexão. Recarregue a página.');
 });
 
-// ── QUANDO MUDA A DATA ───────────────────────────────────────
+// ── QUANDO MUDA A DATA ────────────────────────────────────────
 document.getElementById('bookingDate').addEventListener('change', async () => {
   const date = document.getElementById('bookingDate').value;
   renderTimeSlots();
-  if (db) await loadAppointmentsForDate(date);
+  if (supabase) await loadAppointmentsForDate(date);
 });
 
-// ── RENDERIZAR HORÁRIOS ──────────────────────────────────────
+// ── RENDERIZAR HORÁRIOS ───────────────────────────────────────
 function renderTimeSlots() {
   const container = document.getElementById('timeSlots');
   const date      = document.getElementById('bookingDate').value;
@@ -109,7 +95,6 @@ function renderTimeSlots() {
   if (!date) { container.innerHTML = ''; return; }
 
   const booked = appointments.filter(a => a.date === date).map(a => a.time);
-
   selectedTime = null;
 
   const groups = [
@@ -166,26 +151,29 @@ async function confirmBooking() {
   if (!service)          return shakeField('serviceSelect', 'Escolha um serviço');
   if (!date)             return shakeField('bookingDate',   'Escolha uma data');
   if (!selectedTime)     return toast('⚠ Selecione um horário');
-  if (!db)               return toast('⚠ Sem conexão. Recarregue a página.');
+  if (!supabase)         return toast('⚠ Sem conexão. Recarregue a página.');
 
-  // Verifica corrida simultânea (dois clientes no mesmo horário ao mesmo tempo)
-  const { collection, query, where, getDocs, addDoc } = window._fs;
-  const checkQ    = query(collection(db, 'appointments'), where('date', '==', date), where('time', '==', selectedTime));
-  const checkSnap = await getDocs(checkQ);
-  if (!checkSnap.empty) {
+  // Verifica corrida simultânea
+  const { data: existing } = await supabase
+    .from('appointments')
+    .select('id')
+    .eq('date', date)
+    .eq('time', selectedTime);
+  if (existing && existing.length > 0) {
     toast('⚠ Esse horário acabou de ser ocupado. Escolha outro.');
     await loadAppointmentsForDate(date);
     return;
   }
 
-  // Desabilita botão para evitar duplo clique
   const btn = document.querySelector('#bookingForm .btn-gold');
   if (btn) { btn.disabled = true; btn.textContent = 'Salvando...'; }
 
   try {
     const appt = { name, phone, barber, service, date, time: selectedTime, done: false, created: new Date().toISOString() };
-    const docRef = await addDoc(collection(db, 'appointments'), appt);
-    lastBookedId = docRef.id;
+    const { data, error } = await supabase.from('appointments').insert([appt]).select().single();
+    if (error) throw error;
+
+    lastBookedId = data.id;
 
     const [y,m,d] = date.split('-');
     document.getElementById('successMsg').textContent =
@@ -214,7 +202,7 @@ function resetBooking() {
   loadAppointmentsForDate(document.getElementById('bookingDate').value);
 }
 
-// ── CANCELAMENTO ─────────────────────────────────────────────
+// ── CANCELAMENTO ──────────────────────────────────────────────
 function openCancelFromSuccess() {
   document.getElementById('cancelSection').scrollIntoView({ behavior: 'smooth' });
   const phone = document.getElementById('clientPhone').value;
@@ -231,14 +219,18 @@ async function searchCancel() {
     res.innerHTML = '<p class="cancel-msg error">⚠ Digite um telefone válido (mín. 10 números).</p>';
     return;
   }
-  if (!db) { res.innerHTML = '<p class="cancel-msg error">⚠ Sem conexão.</p>'; return; }
+  if (!supabase) { res.innerHTML = '<p class="cancel-msg error">⚠ Sem conexão.</p>'; return; }
 
   res.innerHTML = '<p class="cancel-msg">Buscando...</p>';
 
-  const { collection, query, where, getDocs } = window._fs;
-  const q    = query(collection(db, 'appointments'), where('phone', '==', phone));
-  const snap = await getDocs(q);
-  const found = snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(a => !a.done);
+  const { data, error } = await supabase
+    .from('appointments')
+    .select('*')
+    .eq('phone', phone)
+    .eq('done', false);
+
+  if (error) { res.innerHTML = '<p class="cancel-msg error">⚠ Erro ao buscar.</p>'; return; }
+  const found = data || [];
 
   if (found.length === 0) {
     res.innerHTML = '<p class="cancel-msg">Nenhum agendamento ativo encontrado para esse telefone.</p>';
@@ -261,13 +253,13 @@ async function searchCancel() {
 
 async function confirmCancel(id) {
   if (!confirm('Tem certeza que deseja cancelar este agendamento?')) return;
-  const { doc, deleteDoc } = window._fs;
-  await deleteDoc(doc(db, 'appointments', id));
+  const { error } = await supabase.from('appointments').delete().eq('id', id);
+  if (error) { toast('⚠ Erro ao cancelar.'); return; }
   toast('✓ Agendamento cancelado com sucesso');
   searchCancel();
 }
 
-// ── LOGIN MODAL ──────────────────────────────────────────────
+// ── LOGIN MODAL ───────────────────────────────────────────────
 document.getElementById('lockBtn').addEventListener('click', openLogin);
 
 function openLogin() {
@@ -310,7 +302,7 @@ function togglePw() {
   inp.type  = inp.type === 'password' ? 'text' : 'password';
 }
 
-// ── PAINEL ADMIN ─────────────────────────────────────────────
+// ── PAINEL ADMIN ──────────────────────────────────────────────
 function showAdmin() {
   document.getElementById('publicPage').style.display = 'none';
   document.getElementById('adminPage').style.display  = 'block';
@@ -323,24 +315,38 @@ function showAdmin() {
 }
 
 function doLogout() {
-  if (unsubscribeAdmin) { unsubscribeAdmin(); unsubscribeAdmin = null; }
+  if (adminChannel) { supabase.removeChannel(adminChannel); adminChannel = null; }
   loggedIn = false; adminWho = '';
   document.getElementById('publicPage').style.display = 'block';
   document.getElementById('adminPage').style.display  = 'none';
 }
 
-// Listener em tempo real: painel atualiza sozinho quando chega agendamento novo
+// Listener em tempo real via Supabase Realtime
 function startAdminListener() {
-  if (!db) return;
-  if (unsubscribeAdmin) unsubscribeAdmin();
+  if (!supabase) return;
+  if (adminChannel) supabase.removeChannel(adminChannel);
 
-  const { collection, onSnapshot, orderBy, query } = window._fs;
-  const q = query(collection(db, 'appointments'), orderBy('date'), orderBy('time'));
+  // Carrega inicial
+  loadAllForAdmin();
 
-  unsubscribeAdmin = onSnapshot(q, snap => {
-    window._adminAll = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-    renderAdminStatic(window._adminAll);
-  });
+  // Escuta mudanças em tempo real
+  adminChannel = supabase
+    .channel('appointments-admin')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'appointments' }, () => {
+      loadAllForAdmin();
+    })
+    .subscribe();
+}
+
+async function loadAllForAdmin() {
+  const { data, error } = await supabase
+    .from('appointments')
+    .select('*')
+    .order('date', { ascending: true })
+    .order('time', { ascending: true });
+  if (error) { console.error(error); return; }
+  window._adminAll = data || [];
+  renderAdminStatic(window._adminAll);
 }
 
 function renderAdmin() {
@@ -403,23 +409,22 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 async function markDone(id) {
-  const { doc, updateDoc } = window._fs;
-  await updateDoc(doc(db, 'appointments', id), { done: true });
+  const { error } = await supabase.from('appointments').update({ done: true }).eq('id', id);
+  if (error) toast('⚠ Erro ao atualizar.');
 }
 
 async function deleteAppt(id) {
-  const { doc, deleteDoc } = window._fs;
-  await deleteDoc(doc(db, 'appointments', id));
+  const { error } = await supabase.from('appointments').delete().eq('id', id);
+  if (error) toast('⚠ Erro ao remover.');
 }
 
 async function clearAll() {
   if (!confirm('Tem certeza? Isso apagará TODOS os agendamentos.')) return;
-  const { collection, getDocs, doc, deleteDoc } = window._fs;
-  const snap = await getDocs(collection(db, 'appointments'));
-  await Promise.all(snap.docs.map(d => deleteDoc(doc(db, 'appointments', d.id))));
+  const { error } = await supabase.from('appointments').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+  if (error) toast('⚠ Erro ao limpar.');
 }
 
-// ── UTILITÁRIOS ──────────────────────────────────────────────
+// ── UTILITÁRIOS ───────────────────────────────────────────────
 function shakeField(id, msg) {
   const el = document.getElementById(id);
   el.style.borderColor = '#e05252';
